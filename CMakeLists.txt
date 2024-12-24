@@ -7,11 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 添加包含目录
 include_directories(/opt/benchmark-1.8.5/include)
-include_directories(/opt/protobuf-3.6.1/include)
+# include_directories(/opt/protobuf-3.6.1/include)
+include_directories(/opt/protobuf-3.15.0/include)
 
 # 添加库目录
 link_directories(/opt/benchmark-1.8.5/lib)
-link_directories(/opt/protobuf-3.6.1/lib)
+# link_directories(/opt/protobuf-3.6.1/lib)
+link_directories(/opt/protobuf-3.15.0/lib)
 
 # 添加可执行文件
 add_executable(benchmark_demo 
@@ -19,8 +21,10 @@ benchmark_test.cpp
 thread_safe_map_test.cpp 
 market_inst_test.cpp 
 bitflag_test.cpp
-protobuf_test_3.6.1.cpp
-pb_3.6.1/message.pb.cc
+# protobuf_test_3.6.1.cpp
+# pb_3.6.1/message.pb.cc
+protobuf_test_3.15.0.cpp
+pb_3.15.0/message.pb.cc
 )
 
 # 链接库

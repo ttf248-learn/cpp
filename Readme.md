@@ -15,6 +15,16 @@ Benchmark                  Time             CPU   Iterations
 BM_PB_Serialize         1581 ns         1580 ns       420492
 BM_PB_Deserialize        962 ns          961 ns       724950
 
+## pb3.15.0 benchmark
+
+sh autogen.sh && chmod +x configure && ./configure CFLAGS="-fPIC"  CXXFLAGS="-fPIC" --prefix=/opt/protobuf-3.15.0 && make -j16 && sudo make install
+
+------------------------------------------------------------
+Benchmark                  Time             CPU   Iterations
+------------------------------------------------------------
+BM_PB_Serialize         1587 ns         1587 ns       435665
+BM_PB_Deserialize       2520 ns         2520 ns       276263
+
 ## pb29.2 benchmark
 
 编译步骤已经调整，直接下载源码编译不太方便，谷歌已经开始启用bazel编译，git 更新到指定的分支，更新 submodules

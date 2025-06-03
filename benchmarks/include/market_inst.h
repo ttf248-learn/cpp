@@ -53,7 +53,10 @@ struct MarketInst
             return flag < other.flag;
     }
 
-    std::string GetKey() const;
+    std::string GetKey() const
+    {
+        return market + "_" + inst + "_" + std::to_string(flag);
+    }
 };
 
 struct HashMarketInst

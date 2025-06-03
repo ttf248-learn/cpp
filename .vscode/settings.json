@@ -16,5 +16,6 @@
         "*.wxs": "javascript",
         "string": "cpp",
         "string_view": "cpp"
-    }
+    },
+    "github.copilot.chat.localeOverride": "zh-CN"
 }

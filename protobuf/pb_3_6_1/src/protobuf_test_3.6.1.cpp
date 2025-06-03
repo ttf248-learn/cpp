@@ -1,5 +1,5 @@
 #include <benchmark/benchmark.h>
-#include "pb_3.6.1/message.pb.h"
+#include "message.pb.h"
 #include <string>
 #include <vector>
 

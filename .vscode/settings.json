@@ -1,8 +1,8 @@
 {
     "cmake.debugConfig": {
-        "args": [
-            "--benchmark_filter=BM_PB*"
-        ],
+        // "args": [
+        //     "--benchmark_filter=BM_PB*"
+        // ],
         // "cwd": "/home/xiangtl/core/manage/ykcz_securities_trade/runtime_env/debug/linuxs/bin",
         // "environment": [
         //     {

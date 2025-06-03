@@ -47,3 +47,6 @@ if(NOT SKIP_PB_3_19_6)
     message(STATUS "Adding protobuf/pb_3_19_6 subdirectory...")
     add_subdirectory(protobuf/pb_3_19_6)
 endif()
+
+message(STATUS "Adding system_monitor subdirectory...")
+add_subdirectory(system_monitor)

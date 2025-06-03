@@ -6,9 +6,6 @@ project(benchmark_common)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -fPIC")
-
 # 设置三方库路径
 set(BENCHMARK_ROOT "/opt/benchmark-1.8.5")
 

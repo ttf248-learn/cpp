@@ -1,4 +1,5 @@
 #include "system_monitor.h"
+#include "prometheus_exporter.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8,12 +9,13 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-SystemMonitor::SystemMonitor() 
+SystemMonitor::SystemMonitor(const std::string& prometheus_address) 
     : running_(false), interval_seconds_(1), last_total_time_(0), last_idle_time_(0),
-      last_process_utime_(0), last_process_stime_(0) {
+      last_process_utime_(0), last_process_stime_(0), prometheus_address_(prometheus_address) {
     process_start_time_ = std::chrono::steady_clock::now();
     last_io_stats_ = {};
     last_network_stats_ = {};
+    prometheus_exporter_ = std::make_unique<PrometheusExporter>(prometheus_address);
 }
 
 SystemMonitor::~SystemMonitor() {
@@ -55,6 +57,10 @@ bool SystemMonitor::isRunning() const {
     return running_.load();
 }
 
+std::string SystemMonitor::getPrometheusAddress() const {
+    return prometheus_address_;
+}
+
 SystemInfo SystemMonitor::getCurrentSystemInfo() {
     SystemInfo info;
     info.cpu_usage_percent = getCpuUsage();
@@ -87,6 +93,11 @@ void SystemMonitor::monitorLoop() {
     while (running_.load()) {
         SystemInfo info = getCurrentSystemInfo();
         printSystemInfo(info);
+        
+        // 更新 Prometheus 指标
+        if (prometheus_exporter_) {
+            prometheus_exporter_->UpdateMetrics(info);
+        }
         
         std::this_thread::sleep_for(std::chrono::seconds(interval_seconds_.load()));
     }

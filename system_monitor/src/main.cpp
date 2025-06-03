@@ -203,6 +203,7 @@ int main(int argc, char* argv[]) {
     try {
         std::cout << "Starting System Monitor Service..." << std::endl;
         std::cout << "Monitoring interval: " << interval << " seconds" << std::endl;
+        std::cout << "Prometheus metrics available at: http://" << g_monitor->getPrometheusAddress() << "/metrics" << std::endl;
         std::cout << "Press Ctrl+C to stop monitoring" << std::endl;
         std::cout << std::endl;
 

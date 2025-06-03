@@ -21,9 +21,15 @@ file(GLOB SYSTEM_MONITOR_SOURCES
 # 创建可执行文件
 add_executable(system_monitor ${SYSTEM_MONITOR_SOURCES})
 
-# 链接系统库
+# 查找 prometheus-cpp 库
+find_package(prometheus-cpp CONFIG REQUIRED)
+
+# 链接系统库和 prometheus-cpp
 target_link_libraries(system_monitor
+    PRIVATE
     pthread
+    prometheus-cpp::pull
+    prometheus-cpp::core
 )
 
 # 设置目标属性

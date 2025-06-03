@@ -75,7 +75,7 @@ struct SystemInfo {
 
 class SystemMonitor {
 public:
-    SystemMonitor();
+    SystemMonitor(const std::string& prometheus_address = "0.0.0.0:8080");
     ~SystemMonitor();
 
     // 启动监控服务
@@ -92,6 +92,9 @@ public:
     
     // 是否正在运行
     bool isRunning() const;
+    
+    // 获取 Prometheus 指标地址
+    std::string getPrometheusAddress() const;
 
 private:
     void monitorLoop();
@@ -112,6 +115,10 @@ private:
     size_t getProcessUptime();
     void getDetailedMemoryInfo(SystemInfo& info);
     void getProcessSchedulingInfo(SystemInfo& info);
+
+    // Prometheus 相关
+    std::string prometheus_address_;
+    std::unique_ptr<class PrometheusExporter> prometheus_exporter_;
 
     std::atomic<bool> running_;
     std::atomic<int> interval_seconds_;

@@ -173,27 +173,45 @@ void Logger::logWithLocation(LogLevel level, const std::string& file, int line,
     main_logger_->log(spdlog_level, formatted_message);
 }
 
-spdlog::level::level_enum Logger::logLevelToSpdlogLevel(LogLevel level) const {
-    switch (level) {
-        case LogLevel::TRACE:    return spdlog::level::trace;
-        case LogLevel::DEBUG:    return spdlog::level::debug;
-        case LogLevel::INFO:     return spdlog::level::info;
-        case LogLevel::WARN:     return spdlog::level::warn;
-        case LogLevel::ERROR:    return spdlog::level::err;
-        case LogLevel::CRITICAL: return spdlog::level::critical;
-        default:                 return spdlog::level::info;
+spdlog::level::level_enum Logger::logLevelToSpdlogLevel(LogLevel level) const
+{
+    switch (level)
+    {
+    case LogLevel::TRACE:
+        return spdlog::level::trace;
+    case LogLevel::DBG:
+        return spdlog::level::debug;
+    case LogLevel::INFO:
+        return spdlog::level::info;
+    case LogLevel::WARN:
+        return spdlog::level::warn;
+    case LogLevel::ERROR:
+        return spdlog::level::err;
+    case LogLevel::CRITICAL:
+        return spdlog::level::critical;
+    default:
+        return spdlog::level::info;
     }
 }
 
-std::string Logger::logLevelToString(LogLevel level) const {
-    switch (level) {
-        case LogLevel::TRACE:    return "TRACE";
-        case LogLevel::DEBUG:    return "DEBUG";
-        case LogLevel::INFO:     return "INFO";
-        case LogLevel::WARN:     return "WARN";
-        case LogLevel::ERROR:    return "ERROR";
-        case LogLevel::CRITICAL: return "CRITICAL";
-        default:                 return "UNKNOWN";
+std::string Logger::logLevelToString(LogLevel level) const
+{
+    switch (level)
+    {
+    case LogLevel::TRACE:
+        return "TRACE";
+    case LogLevel::DBG:
+        return "DEBUG";
+    case LogLevel::INFO:
+        return "INFO";
+    case LogLevel::WARN:
+        return "WARN";
+    case LogLevel::ERROR:
+        return "ERROR";
+    case LogLevel::CRITICAL:
+        return "CRITICAL";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -204,38 +222,4 @@ bool Logger::isInitialized() const {
 LogLevel Logger::getCurrentLevel() const {
     return current_level_;
 }
-
-std::shared_ptr<spdlog::logger> Logger::getMainLogger() const {
-    return main_logger_;
-}
-
-std::shared_ptr<spdlog::logger> Logger::getAccessLogger() const {
-    return access_logger_;
-}
-
-std::shared_ptr<spdlog::logger> Logger::getPerformanceLogger() const {
-    return performance_logger_;
-}
-
-// 性能计时器实现
-PerformanceTimer::PerformanceTimer(const std::string& name) 
-    : name_(name), start_time_(std::chrono::high_resolution_clock::now()) {
-}
-
-PerformanceTimer::~PerformanceTimer() {
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time_);
-    
-    Logger::getInstance().logPerformance(
-        fmt::format("[PERF] {} took {} microseconds", name_, duration.count()));
-}
-
-void PerformanceTimer::checkpoint(const std::string& checkpoint_name) {
-    auto current_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(current_time - start_time_);
-    
-    Logger::getInstance().logPerformance(
-        fmt::format("[PERF] {} - {} at {} microseconds", name_, checkpoint_name, duration.count()));
-}
-
 } // namespace market_feeder

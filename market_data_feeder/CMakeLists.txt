@@ -46,10 +46,10 @@ find_library(MYSQL_CONNECTOR_LIBRARY
     NO_DEFAULT_PATH
 )
 
-find_library(MYSQL_CONNECTOR_STATIC_LIBRARY mysqlcppconn8-static
-    HINTS /usr/local/lib /usr/lib
-    PATH_SUFFIXES mysql
-)
+# find_library(MYSQL_CONNECTOR_STATIC_LIBRARY mysqlcppconn8-static
+#     HINTS /usr/local/lib /usr/lib
+#     PATH_SUFFIXES mysql
+# )
 
 # 分开检查 MYSQL_CONNECTOR_INCLUDE_DIR MYSQL_CONNECTOR_LIBRARY
 if(NOT MYSQL_CONNECTOR_INCLUDE_DIR)
@@ -101,12 +101,16 @@ add_executable(market_data_feeder
 # 链接库
 target_link_libraries(market_data_feeder
     Threads::Threads
-    ${SPDLOG_LIBRARY}
     ${MYSQL_CONNECTOR_LIBRARY}
     dl
     ssl
     crypto
 )
+
+# 如果找到 spdlog 库，则链接它
+if(SPDLOG_LIBRARY)
+    target_link_libraries(market_data_feeder ${SPDLOG_LIBRARY})
+endif()
 
 # 如果找不到 spdlog，使用头文件版本
 if(NOT SPDLOG_LIBRARY)

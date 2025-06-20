@@ -48,5 +48,8 @@ if(NOT SKIP_PB_3_19_6)
     add_subdirectory(protobuf/pb_3_19_6)
 endif()
 
-message(STATUS "Adding system_monitor subdirectory...")
-add_subdirectory(system_monitor)
+# message(STATUS "Adding system_monitor subdirectory...")
+# add_subdirectory(system_monitor)
+
+message(STATUS "Adding market_data_feeder subdirectory...")
+add_subdirectory(market_data_feeder)

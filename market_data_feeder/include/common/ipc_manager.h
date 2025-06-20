@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <cstring>
 
 namespace market_feeder {
 

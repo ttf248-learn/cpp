@@ -1,7 +1,7 @@
 #pragma once
 
 #include "common/types.h"
-#include <mysql/mysql.h>
+#include <mysqlx/xdevapi.h>
 #include <string>
 #include <vector>
 #include <memory>
@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <exception>
 
 namespace market_feeder {
 
@@ -69,11 +70,11 @@ public:
     DBErrorCode executeQuery(const std::string& sql);
     
     // 执行查询并返回结果
-    DBErrorCode executeQuery(const std::string& sql, MYSQL_RES*& result);
+    DBErrorCode executeQuery(const std::string& sql, mysqlx::SqlResult& result);
     
     // 执行预处理语句
     DBErrorCode executePreparedStatement(const std::string& sql, 
-                                        const std::vector<std::string>& params);
+                                        const std::vector<mysqlx::Value>& params);
     
     // 开始事务
     DBErrorCode beginTransaction();
@@ -96,8 +97,8 @@ public:
     // 转义字符串
     std::string escapeString(const std::string& str) const;
     
-    // 获取原始连接
-    MYSQL* getRawConnection() { return mysql_; }
+    // 获取原始会话
+    mysqlx::Session* getSession() { return session_.get(); }
     
     // 设置使用状态
     void setInUse(bool in_use) { in_use_ = in_use; }
@@ -108,11 +109,14 @@ public:
     void updateLastUsedTime() { last_used_time_ = std::chrono::system_clock::now(); }
     
 private:
-    MYSQL* mysql_;
+    std::unique_ptr<mysqlx::Session> session_;
     bool connected_;
     bool in_use_;
     std::chrono::system_clock::time_point last_used_time_;
     DBConfig config_;
+    std::string last_error_;
+    uint64_t affected_rows_;
+    uint64_t last_insert_id_;
 };
 
 // 数据库连接池

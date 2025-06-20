@@ -27,21 +27,30 @@ find_library(SPDLOG_LIBRARY spdlog
     HINTS /usr/local/lib /usr/lib
 )
 
-# 查找 MySQL 客户端库
-find_path(MYSQL_INCLUDE_DIR mysql/mysql.h
-    HINTS /usr/include /usr/local/include
+# 查找 MySQL Connector/C++ 8.0.20
+find_path(MYSQL_CONNECTOR_INCLUDE_DIR mysqlx/xdevapi.h
+    HINTS /usr/local/include /usr/include
+    PATH_SUFFIXES mysql-cppconn-8
+)
+find_library(MYSQL_CONNECTOR_LIBRARY mysqlcppconn8
+    HINTS /usr/local/lib /usr/lib
     PATH_SUFFIXES mysql
 )
-find_library(MYSQL_LIBRARY mysqlclient
-    HINTS /usr/lib /usr/local/lib
+find_library(MYSQL_CONNECTOR_STATIC_LIBRARY mysqlcppconn8-static
+    HINTS /usr/local/lib /usr/lib
     PATH_SUFFIXES mysql
 )
+
+# 检查是否找到MySQL Connector/C++
+if(NOT MYSQL_CONNECTOR_INCLUDE_DIR OR NOT MYSQL_CONNECTOR_LIBRARY)
+    message(FATAL_ERROR "MySQL Connector/C++ 8.0.20 not found. Please install mysql-connector-c++-dev package.")
+endif()
 
 # 设置包含目录
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SPDLOG_INCLUDE_DIR}
-    ${MYSQL_INCLUDE_DIR}
+    ${MYSQL_CONNECTOR_INCLUDE_DIR}
 )
 
 # 收集源文件
@@ -79,8 +88,10 @@ add_executable(market_data_feeder
 target_link_libraries(market_data_feeder
     Threads::Threads
     ${SPDLOG_LIBRARY}
-    ${MYSQL_LIBRARY}
+    ${MYSQL_CONNECTOR_LIBRARY}
     dl
+    ssl
+    crypto
 )
 
 # 如果找不到 spdlog，使用头文件版本
@@ -106,5 +117,5 @@ message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  spdlog Include: ${SPDLOG_INCLUDE_DIR}")
 message(STATUS "  spdlog Library: ${SPDLOG_LIBRARY}")
-message(STATUS "  MySQL Include: ${MYSQL_INCLUDE_DIR}")
-message(STATUS "  MySQL Library: ${MYSQL_LIBRARY}")
+message(STATUS "  MySQL Connector Include: ${MYSQL_CONNECTOR_INCLUDE_DIR}")
+message(STATUS "  MySQL Connector Library: ${MYSQL_CONNECTOR_LIBRARY}")

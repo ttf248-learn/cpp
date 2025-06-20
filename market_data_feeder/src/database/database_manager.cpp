@@ -1,153 +1,296 @@
 #include "database/database_manager.h"
 #include "common/logger.h"
-#include <mysql/mysql.h>
+#include <mysqlx/xdevapi.h>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <thread>
 
 namespace market_feeder {
 
 // DBConnection实现
-DBConnection::DBConnection() : mysql_(nullptr), connected_(false), last_used_(0) {
-    mysql_ = mysql_init(nullptr);
-    if (!mysql_) {
-        throw std::runtime_error("Failed to initialize MySQL connection");
-    }
+DBConnection::DBConnection() 
+    : session_(nullptr), connected_(false), in_use_(false), 
+      affected_rows_(0), last_insert_id_(0) {
+    last_used_time_ = std::chrono::system_clock::now();
 }
 
 DBConnection::~DBConnection() {
     disconnect();
-    if (mysql_) {
-        mysql_close(mysql_);
-        mysql_ = nullptr;
-    }
 }
 
-bool DBConnection::connect(const DatabaseConfig& config) {
+DBErrorCode DBConnection::connect(const DBConfig& config) {
     if (connected_) {
-        return true;
+        return DBErrorCode::SUCCESS;
     }
     
-    // 设置连接选项
-    unsigned int timeout = config.connect_timeout;
-    mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
-    mysql_options(mysql_, MYSQL_OPT_READ_TIMEOUT, &timeout);
-    mysql_options(mysql_, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
-    
-    my_bool reconnect = config.auto_reconnect ? 1 : 0;
-    mysql_options(mysql_, MYSQL_OPT_RECONNECT, &reconnect);
-    
-    mysql_options(mysql_, MYSQL_SET_CHARSET_NAME, config.charset.c_str());
-    
-    // 建立连接
-    if (!mysql_real_connect(mysql_, 
-                           config.host.c_str(),
-                           config.username.c_str(),
-                           config.password.c_str(),
-                           config.database.c_str(),
-                           config.port,
-                           nullptr, 
-                           CLIENT_MULTI_STATEMENTS)) {
-        LOG_ERROR("Failed to connect to database: {}", mysql_error(mysql_));
-        return false;
+    try {
+        config_ = config;
+        
+        // 构建连接字符串
+        std::ostringstream connection_string;
+        connection_string << "mysqlx://" << config.username << ":" << config.password
+                         << "@" << config.host << ":" << config.port
+                         << "/" << config.database;
+        
+        // 设置连接选项
+        mysqlx::SessionSettings settings(connection_string.str());
+        settings.set(mysqlx::SessionOption::CONNECT_TIMEOUT, config.connect_timeout * 1000); // 毫秒
+        
+        if (config.use_ssl) {
+            settings.set(mysqlx::SessionOption::SSL_MODE, mysqlx::SSLMode::REQUIRED);
+        } else {
+            settings.set(mysqlx::SessionOption::SSL_MODE, mysqlx::SSLMode::DISABLED);
+        }
+        
+        // 创建会话
+        session_ = std::make_unique<mysqlx::Session>(settings);
+        
+        connected_ = true;
+        last_error_.clear();
+        updateLastUsedTime();
+        
+        LOG_DEBUG("Database connection established using MySQL Connector/C++ X DevAPI");
+        return DBErrorCode::SUCCESS;
+        
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to connect to database: {}", last_error_);
+        return DBErrorCode::CONNECTION_FAILED;
+    } catch (const std::exception& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to connect to database: {}", last_error_);
+        return DBErrorCode::CONNECTION_FAILED;
     }
-    
-    connected_ = true;
-    last_used_ = time(nullptr);
-    config_ = config;
-    
-    LOG_DEBUG("Database connection established");
-    return true;
 }
 
 void DBConnection::disconnect() {
-    if (connected_ && mysql_) {
-        mysql_close(mysql_);
-        mysql_ = mysql_init(nullptr);
+    if (connected_ && session_) {
+        try {
+            session_->close();
+        } catch (const std::exception& e) {
+            LOG_WARN("Error during disconnect: {}", e.what());
+        }
+        session_.reset();
         connected_ = false;
     }
 }
 
 bool DBConnection::isConnected() const {
-    if (!connected_ || !mysql_) {
+    if (!connected_ || !session_) {
         return false;
     }
     
-    // 检查连接是否仍然有效
-    return mysql_ping(mysql_) == 0;
+    try {
+        // 执行简单查询检查连接状态
+        session_->sql("SELECT 1").execute();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
-bool DBConnection::reconnect() {
-    disconnect();
-    return connect(config_);
-}
-
-bool DBConnection::execute(const std::string& sql) {
+DBErrorCode DBConnection::executeQuery(const std::string& sql) {
     if (!isConnected()) {
-        if (!reconnect()) {
-            LOG_ERROR("Failed to reconnect to database");
-            return false;
+        LOG_ERROR("Database not connected");
+        return DBErrorCode::CONNECTION_FAILED;
+    }
+    
+    try {
+        auto result = session_->sql(sql).execute();
+        affected_rows_ = result.getAffectedItemsCount();
+        
+        // 尝试获取最后插入的ID（如果适用）
+        try {
+            last_insert_id_ = result.getAutoIncrementValue();
+        } catch (const std::exception&) {
+            // 如果查询不产生自增ID，忽略异常
+            last_insert_id_ = 0;
         }
+        
+        updateLastUsedTime();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+        
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute SQL: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    } catch (const std::exception& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute SQL: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    }
+}
+
+DBErrorCode DBConnection::executeQuery(const std::string& sql, mysqlx::SqlResult& result) {
+    if (!isConnected()) {
+        LOG_ERROR("Database not connected");
+        return DBErrorCode::CONNECTION_FAILED;
     }
     
-    if (mysql_real_query(mysql_, sql.c_str(), sql.length()) != 0) {
-        LOG_ERROR("Failed to execute SQL: {} - Error: {}", sql, mysql_error(mysql_));
-        return false;
+    try {
+        result = session_->sql(sql).execute();
+        affected_rows_ = result.getAffectedItemsCount();
+        
+        try {
+            last_insert_id_ = result.getAutoIncrementValue();
+        } catch (const std::exception&) {
+            last_insert_id_ = 0;
+        }
+        
+        updateLastUsedTime();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+        
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute SQL: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    } catch (const std::exception& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute SQL: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    }
+}
+
+DBErrorCode DBConnection::executePreparedStatement(const std::string& sql, 
+                                                  const std::vector<mysqlx::Value>& params) {
+    if (!isConnected()) {
+        LOG_ERROR("Database not connected");
+        return DBErrorCode::CONNECTION_FAILED;
     }
     
-    last_used_ = time(nullptr);
-    return true;
+    try {
+        auto stmt = session_->sql(sql);
+        
+        // 绑定参数
+        for (const auto& param : params) {
+            stmt.bind(param);
+        }
+        
+        auto result = stmt.execute();
+        affected_rows_ = result.getAffectedItemsCount();
+        
+        try {
+            last_insert_id_ = result.getAutoIncrementValue();
+        } catch (const std::exception&) {
+            last_insert_id_ = 0;
+        }
+        
+        updateLastUsedTime();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+        
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute prepared statement: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    } catch (const std::exception& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to execute prepared statement: {} - Error: {}", sql, last_error_);
+        return DBErrorCode::QUERY_FAILED;
+    }
 }
 
-std::unique_ptr<MYSQL_RES, void(*)(MYSQL_RES*)> DBConnection::query(const std::string& sql) {
-    if (!execute(sql)) {
-        return {nullptr, mysql_free_result};
+DBErrorCode DBConnection::beginTransaction() {
+    if (!isConnected()) {
+        return DBErrorCode::CONNECTION_FAILED;
     }
     
-    MYSQL_RES* result = mysql_store_result(mysql_);
-    return {result, mysql_free_result};
+    try {
+        session_->startTransaction();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to begin transaction: {}", last_error_);
+        return DBErrorCode::TRANSACTION_FAILED;
+    }
 }
 
-std::string DBConnection::escapeString(const std::string& str) {
-    if (!mysql_) {
-        return str;
+DBErrorCode DBConnection::commitTransaction() {
+    if (!isConnected()) {
+        return DBErrorCode::CONNECTION_FAILED;
     }
     
-    std::vector<char> escaped(str.length() * 2 + 1);
-    unsigned long escaped_length = mysql_real_escape_string(mysql_, 
-                                                           escaped.data(), 
-                                                           str.c_str(), 
-                                                           str.length());
+    try {
+        session_->commit();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to commit transaction: {}", last_error_);
+        return DBErrorCode::TRANSACTION_FAILED;
+    }
+}
+
+DBErrorCode DBConnection::rollbackTransaction() {
+    if (!isConnected()) {
+        return DBErrorCode::CONNECTION_FAILED;
+    }
     
-    return std::string(escaped.data(), escaped_length);
+    try {
+        session_->rollback();
+        last_error_.clear();
+        return DBErrorCode::SUCCESS;
+    } catch (const mysqlx::Error& e) {
+        last_error_ = e.what();
+        LOG_ERROR("Failed to rollback transaction: {}", last_error_);
+        return DBErrorCode::TRANSACTION_FAILED;
+    }
 }
 
-uint64_t DBConnection::getLastInsertId() {
-    return mysql_insert_id(mysql_);
+uint64_t DBConnection::getAffectedRows() const {
+    return affected_rows_;
 }
 
-uint64_t DBConnection::getAffectedRows() {
-    return mysql_affected_rows(mysql_);
+uint64_t DBConnection::getLastInsertId() const {
+    return last_insert_id_;
 }
 
-time_t DBConnection::getLastUsed() const {
-    return last_used_;
+std::string DBConnection::getLastError() const {
+    return last_error_;
 }
 
-void DBConnection::updateLastUsed() {
-    last_used_ = time(nullptr);
+std::string DBConnection::escapeString(const std::string& str) const {
+    // MySQL Connector/C++ X DevAPI 自动处理参数转义
+    // 这里提供一个简单的实现用于兼容性
+    std::string escaped = str;
+    
+    // 替换特殊字符
+    size_t pos = 0;
+    while ((pos = escaped.find('\'', pos)) != std::string::npos) {
+        escaped.replace(pos, 1, "\\'");
+        pos += 2;
+    }
+    
+    pos = 0;
+    while ((pos = escaped.find('"', pos)) != std::string::npos) {
+        escaped.replace(pos, 1, "\\\"");
+        pos += 2;
+    }
+    
+    pos = 0;
+    while ((pos = escaped.find('\\', pos)) != std::string::npos) {
+        escaped.replace(pos, 1, "\\\\");
+        pos += 2;
+    }
+    
+    return escaped;
 }
 
 // DBConnectionPool实现
-DBConnectionPool::DBConnectionPool() : initialized_(false), max_connections_(0) {
+DBConnectionPool::DBConnectionPool() 
+    : active_connections_(0), shutdown_requested_(false), initialized_(false) {
 }
 
 DBConnectionPool::~DBConnectionPool() {
     shutdown();
 }
 
-bool DBConnectionPool::initialize(const DatabaseConfig& config) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool DBConnectionPool::initialize(const DBConfig& config) {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
     
     if (initialized_) {
         LOG_WARN("Database connection pool already initialized");
@@ -155,13 +298,14 @@ bool DBConnectionPool::initialize(const DatabaseConfig& config) {
     }
     
     config_ = config;
-    max_connections_ = config.pool_size;
+    shutdown_requested_ = false;
     
     // 创建初始连接
-    for (int i = 0; i < max_connections_; ++i) {
-        auto conn = std::make_unique<DBConnection>();
-        if (conn->connect(config)) {
-            available_connections_.push(std::move(conn));
+    for (int i = 0; i < config.pool_size; ++i) {
+        auto conn = createConnection();
+        if (conn && conn->connect(config) == DBErrorCode::SUCCESS) {
+            idle_connections_.push(conn);
+            all_connections_.push_back(conn);
         } else {
             LOG_ERROR("Failed to create initial database connection {}", i);
             return false;
@@ -170,96 +314,167 @@ bool DBConnectionPool::initialize(const DatabaseConfig& config) {
     
     initialized_ = true;
     
-    LOG_INFO("Database connection pool initialized with {} connections", max_connections_);
+    LOG_INFO("Database connection pool initialized with {} connections", config.pool_size);
     return true;
 }
 
-void DBConnectionPool::shutdown() {
-    std::lock_guard<std::mutex> lock(mutex_);
+std::shared_ptr<DBConnection> DBConnectionPool::getConnection(int timeout_ms) {
+    std::unique_lock<std::mutex> lock(pool_mutex_);
     
-    if (!initialized_) {
-        return;
-    }
-    
-    // 清空可用连接
-    while (!available_connections_.empty()) {
-        available_connections_.pop();
-    }
-    
-    // 等待所有使用中的连接归还
-    // 注意：在实际应用中，这里应该有超时机制
-    
-    initialized_ = false;
-    
-    LOG_INFO("Database connection pool shutdown");
-}
-
-std::unique_ptr<DBConnection> DBConnectionPool::getConnection() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    
-    if (!initialized_) {
-        LOG_ERROR("Database connection pool not initialized");
+    if (!initialized_ || shutdown_requested_) {
+        LOG_ERROR("Database connection pool not available");
         return nullptr;
     }
     
     // 等待可用连接
-    condition_.wait(lock, [this] { return !available_connections_.empty(); });
+    auto timeout = std::chrono::milliseconds(timeout_ms);
+    if (!pool_condition_.wait_for(lock, timeout, [this] { 
+        return !idle_connections_.empty() || shutdown_requested_; 
+    })) {
+        LOG_ERROR("Timeout waiting for database connection");
+        return nullptr;
+    }
     
-    auto conn = std::move(available_connections_.front());
-    available_connections_.pop();
+    if (shutdown_requested_) {
+        return nullptr;
+    }
     
-    // 检查连接是否仍然有效
-    if (!conn->isConnected()) {
-        if (!conn->reconnect()) {
-            LOG_ERROR("Failed to reconnect database connection");
-            
-            // 尝试创建新连接
-            conn = std::make_unique<DBConnection>();
-            if (!conn->connect(config_)) {
-                LOG_ERROR("Failed to create new database connection");
-                return nullptr;
-            }
+    auto conn = idle_connections_.front();
+    idle_connections_.pop();
+    
+    // 验证连接
+    if (!validateConnection(conn)) {
+        // 连接无效，创建新连接
+        conn = createConnection();
+        if (!conn || conn->connect(config_) != DBErrorCode::SUCCESS) {
+            LOG_ERROR("Failed to create replacement database connection");
+            return nullptr;
         }
     }
     
-    conn->updateLastUsed();
+    conn->setInUse(true);
+    conn->updateLastUsedTime();
+    active_connections_++;
+    
     return conn;
 }
 
-void DBConnectionPool::returnConnection(std::unique_ptr<DBConnection> conn) {
-    if (!conn) {
+void DBConnectionPool::returnConnection(std::shared_ptr<DBConnection> connection) {
+    if (!connection) {
         return;
     }
     
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(pool_mutex_);
     
-    if (!initialized_) {
+    if (!initialized_ || shutdown_requested_) {
         return;
     }
     
-    // 检查连接是否仍然有效
-    if (conn->isConnected()) {
-        available_connections_.push(std::move(conn));
-        condition_.notify_one();
+    connection->setInUse(false);
+    active_connections_--;
+    
+    // 验证连接是否仍然有效
+    if (validateConnection(connection)) {
+        idle_connections_.push(connection);
+        pool_condition_.notify_one();
     } else {
-        // 连接无效，创建新连接替代
-        auto new_conn = std::make_unique<DBConnection>();
-        if (new_conn->connect(config_)) {
-            available_connections_.push(std::move(new_conn));
-            condition_.notify_one();
+        // 连接无效，从all_connections_中移除
+        auto it = std::find(all_connections_.begin(), all_connections_.end(), connection);
+        if (it != all_connections_.end()) {
+            all_connections_.erase(it);
+        }
+        
+        // 创建新连接替代
+        auto new_conn = createConnection();
+        if (new_conn && new_conn->connect(config_) == DBErrorCode::SUCCESS) {
+            idle_connections_.push(new_conn);
+            all_connections_.push_back(new_conn);
+            pool_condition_.notify_one();
         } else {
             LOG_ERROR("Failed to create replacement database connection");
         }
     }
 }
 
-size_t DBConnectionPool::getAvailableConnections() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return available_connections_.size();
+size_t DBConnectionPool::getActiveConnections() const {
+    return active_connections_.load();
+}
+
+size_t DBConnectionPool::getIdleConnections() const {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    return idle_connections_.size();
 }
 
 size_t DBConnectionPool::getTotalConnections() const {
-    return max_connections_;
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    return all_connections_.size();
+}
+
+void DBConnectionPool::cleanupIdleConnections(int idle_timeout_seconds) {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    
+    if (!initialized_) {
+        return;
+    }
+    
+    auto now = std::chrono::system_clock::now();
+    auto timeout = std::chrono::seconds(idle_timeout_seconds);
+    
+    std::queue<std::shared_ptr<DBConnection>> new_idle_queue;
+    
+    while (!idle_connections_.empty()) {
+        auto conn = idle_connections_.front();
+        idle_connections_.pop();
+        
+        if (now - conn->getLastUsedTime() < timeout) {
+            new_idle_queue.push(conn);
+        } else {
+            // 移除超时连接
+            auto it = std::find(all_connections_.begin(), all_connections_.end(), conn);
+            if (it != all_connections_.end()) {
+                all_connections_.erase(it);
+            }
+            LOG_DEBUG("Removed idle database connection due to timeout");
+        }
+    }
+    
+    idle_connections_ = std::move(new_idle_queue);
+}
+
+void DBConnectionPool::shutdown() {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    
+    if (!initialized_) {
+        return;
+    }
+    
+    LOG_INFO("Shutting down database connection pool...");
+    
+    shutdown_requested_ = true;
+    pool_condition_.notify_all();
+    
+    // 清空连接池
+    while (!idle_connections_.empty()) {
+        idle_connections_.pop();
+    }
+    
+    all_connections_.clear();
+    active_connections_ = 0;
+    initialized_ = false;
+    
+    LOG_INFO("Database connection pool shutdown completed");
+}
+
+std::shared_ptr<DBConnection> DBConnectionPool::createConnection() {
+    return std::make_shared<DBConnection>();
+}
+
+bool DBConnectionPool::validateConnection(std::shared_ptr<DBConnection> connection) {
+    if (!connection) {
+        return false;
+    }
+    
+    return connection->isConnected();
 }
 
 // DatabaseManager实现
@@ -270,26 +485,19 @@ DatabaseManager::~DatabaseManager() {
     shutdown();
 }
 
-bool DatabaseManager::initialize(const DatabaseConfig& config) {
+bool DatabaseManager::initialize(const DBConfig& config) {
     if (initialized_) {
         LOG_WARN("Database manager already initialized");
         return true;
     }
     
-    LOG_INFO("Initializing database manager...");
+    LOG_INFO("Initializing database manager with MySQL Connector/C++ X DevAPI...");
     
     config_ = config;
-    
-    // 初始化MySQL库
-    if (mysql_library_init(0, nullptr, nullptr) != 0) {
-        LOG_ERROR("Failed to initialize MySQL library");
-        return false;
-    }
     
     // 初始化连接池
     if (!connection_pool_.initialize(config)) {
         LOG_ERROR("Failed to initialize database connection pool");
-        mysql_library_end();
         return false;
     }
     
@@ -315,18 +523,16 @@ void DatabaseManager::shutdown() {
     LOG_INFO("Shutting down database manager...");
     
     connection_pool_.shutdown();
-    mysql_library_end();
-    
     initialized_ = false;
     
     LOG_INFO("Database manager shutdown completed");
 }
 
-bool DatabaseManager::saveMarketData(const MarketData& data) {
+DBErrorCode DatabaseManager::saveMarketData(const MarketData& data) {
     auto conn = connection_pool_.getConnection();
     if (!conn) {
         LOG_ERROR("Failed to get database connection");
-        return false;
+        return DBErrorCode::POOL_EXHAUSTED;
     }
     
     std::ostringstream sql;
@@ -345,176 +551,80 @@ bool DatabaseManager::saveMarketData(const MarketData& data) {
         << data.ask_volume << ", "
         << "NOW())";
     
-    bool result = conn->execute(sql.str());
-    connection_pool_.returnConnection(std::move(conn));
+    auto result = conn->executeQuery(sql.str());
+    connection_pool_.returnConnection(conn);
     
-    if (!result) {
+    if (result != DBErrorCode::SUCCESS) {
         LOG_ERROR("Failed to save market data for symbol {}", data.symbol);
     }
     
     return result;
 }
 
-bool DatabaseManager::saveMarketDataBatch(const std::vector<MarketData>& data_list) {
-    if (data_list.empty()) {
-        return true;
+DBErrorCode DatabaseManager::saveMarketDataBatch(const std::vector<MarketData>& data_batch) {
+    if (data_batch.empty()) {
+        return DBErrorCode::SUCCESS;
     }
     
     auto conn = connection_pool_.getConnection();
     if (!conn) {
         LOG_ERROR("Failed to get database connection");
-        return false;
+        return DBErrorCode::POOL_EXHAUSTED;
     }
     
-    // 构建批量插入SQL
-    std::ostringstream sql;
-    sql << "INSERT INTO market_data (symbol, market, type, timestamp, price, volume, "
-        << "turnover, bid_price, ask_price, bid_volume, ask_volume, created_at) VALUES ";
+    // 开始事务
+    auto tx_result = conn->beginTransaction();
+    if (tx_result != DBErrorCode::SUCCESS) {
+        connection_pool_.returnConnection(conn);
+        return tx_result;
+    }
     
-    for (size_t i = 0; i < data_list.size(); ++i) {
-        const auto& data = data_list[i];
+    try {
+        // 构建批量插入SQL
+        std::ostringstream sql;
+        sql << "INSERT INTO market_data (symbol, market, type, timestamp, price, volume, "
+            << "turnover, bid_price, ask_price, bid_volume, ask_volume, created_at) VALUES ";
         
-        if (i > 0) {
-            sql << ", ";
+        for (size_t i = 0; i < data_batch.size(); ++i) {
+            const auto& data = data_batch[i];
+            
+            if (i > 0) {
+                sql << ", ";
+            }
+            
+            sql << "('"
+                << conn->escapeString(data.symbol) << "', "
+                << static_cast<int>(data.market) << ", "
+                << static_cast<int>(data.type) << ", "
+                << data.timestamp << ", "
+                << std::fixed << std::setprecision(4) << data.price << ", "
+                << data.volume << ", "
+                << std::fixed << std::setprecision(4) << data.turnover << ", "
+                << std::fixed << std::setprecision(4) << data.bid_price << ", "
+                << std::fixed << std::setprecision(4) << data.ask_price << ", "
+                << data.bid_volume << ", "
+                << data.ask_volume << ", "
+                << "NOW())";
         }
         
-        sql << "('"
-            << conn->escapeString(data.symbol) << "', "
-            << static_cast<int>(data.market) << ", "
-            << static_cast<int>(data.type) << ", "
-            << data.timestamp << ", "
-            << std::fixed << std::setprecision(4) << data.price << ", "
-            << data.volume << ", "
-            << std::fixed << std::setprecision(4) << data.turnover << ", "
-            << std::fixed << std::setprecision(4) << data.bid_price << ", "
-            << std::fixed << std::setprecision(4) << data.ask_price << ", "
-            << data.bid_volume << ", "
-            << data.ask_volume << ", "
-            << "NOW())";
-    }
-    
-    bool result = conn->execute(sql.str());
-    connection_pool_.returnConnection(std::move(conn));
-    
-    if (result) {
-        LOG_DEBUG("Saved {} market data records to database", data_list.size());
-    } else {
-        LOG_ERROR("Failed to save {} market data records to database", data_list.size());
-    }
-    
-    return result;
-}
-
-bool DatabaseManager::queryMarketData(const std::string& symbol, MarketType market,
-                                    MarketDataType type, time_t start_time, time_t end_time,
-                                    std::vector<MarketData>& result) {
-    auto conn = connection_pool_.getConnection();
-    if (!conn) {
-        LOG_ERROR("Failed to get database connection");
-        return false;
-    }
-    
-    std::ostringstream sql;
-    sql << "SELECT symbol, market, type, timestamp, price, volume, turnover, "
-        << "bid_price, ask_price, bid_volume, ask_volume FROM market_data WHERE "
-        << "symbol = '" << conn->escapeString(symbol) << "' AND "
-        << "market = " << static_cast<int>(market) << " AND "
-        << "type = " << static_cast<int>(type) << " AND "
-        << "timestamp >= " << start_time << " AND "
-        << "timestamp <= " << end_time << " "
-        << "ORDER BY timestamp ASC";
-    
-    auto query_result = conn->query(sql.str());
-    
-    if (!query_result) {
-        LOG_ERROR("Failed to query market data for symbol {}", symbol);
-        connection_pool_.returnConnection(std::move(conn));
-        return false;
-    }
-    
-    result.clear();
-    MYSQL_ROW row;
-    
-    while ((row = mysql_fetch_row(query_result.get())) != nullptr) {
-        MarketData data;
+        auto result = conn->executeQuery(sql.str());
+        if (result == DBErrorCode::SUCCESS) {
+            conn->commitTransaction();
+            LOG_DEBUG("Saved {} market data records to database", data_batch.size());
+        } else {
+            conn->rollbackTransaction();
+            LOG_ERROR("Failed to save {} market data records to database", data_batch.size());
+        }
         
-        strncpy(data.symbol, row[0], sizeof(data.symbol) - 1);
-        data.symbol[sizeof(data.symbol) - 1] = '\0';
-        data.market = static_cast<MarketType>(std::atoi(row[1]));
-        data.type = static_cast<MarketDataType>(std::atoi(row[2]));
-        data.timestamp = std::atol(row[3]);
-        data.price = std::atof(row[4]);
-        data.volume = std::atol(row[5]);
-        data.turnover = std::atof(row[6]);
-        data.bid_price = std::atof(row[7]);
-        data.ask_price = std::atof(row[8]);
-        data.bid_volume = std::atol(row[9]);
-        data.ask_volume = std::atol(row[10]);
+        connection_pool_.returnConnection(conn);
+        return result;
         
-        result.push_back(data);
+    } catch (const std::exception& e) {
+        conn->rollbackTransaction();
+        connection_pool_.returnConnection(conn);
+        LOG_ERROR("Exception during batch insert: {}", e.what());
+        return DBErrorCode::QUERY_FAILED;
     }
-    
-    connection_pool_.returnConnection(std::move(conn));
-    
-    LOG_DEBUG("Queried {} market data records for symbol {}", result.size(), symbol);
-    return true;
-}
-
-bool DatabaseManager::saveStatistics(const ProcessStatistics& stats) {
-    auto conn = connection_pool_.getConnection();
-    if (!conn) {
-        LOG_ERROR("Failed to get database connection");
-        return false;
-    }
-    
-    std::ostringstream sql;
-    sql << "INSERT INTO process_statistics (worker_id, start_time, messages_processed, "
-        << "data_received, data_sent, errors, last_update, created_at) VALUES ("
-        << stats.worker_id << ", "
-        << stats.start_time << ", "
-        << stats.messages_processed << ", "
-        << stats.data_received << ", "
-        << stats.data_sent << ", "
-        << stats.errors << ", "
-        << stats.last_update << ", "
-        << "NOW()) ON DUPLICATE KEY UPDATE "
-        << "messages_processed = VALUES(messages_processed), "
-        << "data_received = VALUES(data_received), "
-        << "data_sent = VALUES(data_sent), "
-        << "errors = VALUES(errors), "
-        << "last_update = VALUES(last_update), "
-        << "updated_at = NOW()";
-    
-    bool result = conn->execute(sql.str());
-    connection_pool_.returnConnection(std::move(conn));
-    
-    return result;
-}
-
-bool DatabaseManager::saveProcessInfo(const ProcessInfo& info) {
-    auto conn = connection_pool_.getConnection();
-    if (!conn) {
-        LOG_ERROR("Failed to get database connection");
-        return false;
-    }
-    
-    std::ostringstream sql;
-    sql << "INSERT INTO process_info (pid, worker_id, status, start_time, "
-        << "last_heartbeat, created_at) VALUES ("
-        << info.pid << ", "
-        << info.worker_id << ", "
-        << static_cast<int>(info.status) << ", "
-        << info.start_time << ", "
-        << info.last_heartbeat << ", "
-        << "NOW()) ON DUPLICATE KEY UPDATE "
-        << "status = VALUES(status), "
-        << "last_heartbeat = VALUES(last_heartbeat), "
-        << "updated_at = NOW()";
-    
-    bool result = conn->execute(sql.str());
-    connection_pool_.returnConnection(std::move(conn));
-    
-    return result;
 }
 
 bool DatabaseManager::createTables() {
@@ -546,9 +656,9 @@ bool DatabaseManager::createTables() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     )";
     
-    if (!conn->execute(create_market_data_table)) {
+    if (conn->executeQuery(create_market_data_table) != DBErrorCode::SUCCESS) {
         LOG_ERROR("Failed to create market_data table");
-        connection_pool_.returnConnection(std::move(conn));
+        connection_pool_.returnConnection(conn);
         return false;
     }
     
@@ -569,9 +679,9 @@ bool DatabaseManager::createTables() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     )";
     
-    if (!conn->execute(create_stats_table)) {
+    if (conn->executeQuery(create_stats_table) != DBErrorCode::SUCCESS) {
         LOG_ERROR("Failed to create process_statistics table");
-        connection_pool_.returnConnection(std::move(conn));
+        connection_pool_.returnConnection(conn);
         return false;
     }
     
@@ -590,13 +700,13 @@ bool DatabaseManager::createTables() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     )";
     
-    if (!conn->execute(create_process_table)) {
+    if (conn->executeQuery(create_process_table) != DBErrorCode::SUCCESS) {
         LOG_ERROR("Failed to create process_info table");
-        connection_pool_.returnConnection(std::move(conn));
+        connection_pool_.returnConnection(conn);
         return false;
     }
     
-    connection_pool_.returnConnection(std::move(conn));
+    connection_pool_.returnConnection(conn);
     
     LOG_INFO("Database tables created successfully");
     return true;
@@ -609,19 +719,9 @@ bool DatabaseManager::checkConnection() {
     }
     
     bool result = conn->isConnected();
-    connection_pool_.returnConnection(std::move(conn));
+    connection_pool_.returnConnection(conn);
     
     return result;
-}
-
-DatabaseStatistics DatabaseManager::getStatistics() {
-    DatabaseStatistics stats = {};
-    
-    stats.total_connections = connection_pool_.getTotalConnections();
-    stats.available_connections = connection_pool_.getAvailableConnections();
-    stats.active_connections = stats.total_connections - stats.available_connections;
-    
-    return stats;
 }
 
 } // namespace market_feeder

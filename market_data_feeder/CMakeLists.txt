@@ -28,22 +28,36 @@ find_library(SPDLOG_LIBRARY spdlog
 )
 
 # 查找 MySQL Connector/C++ 8.0.20
-find_path(MYSQL_CONNECTOR_INCLUDE_DIR mysqlx/xdevapi.h
-    HINTS /usr/local/include /usr/include
-    PATH_SUFFIXES mysql-cppconn-8
+find_path(MYSQL_CONNECTOR_INCLUDE_DIR
+    NAMES mysqlx/xdevapi.h
+    PATHS
+        /usr/include/mysql-cppconn-8
+        /usr/local/include/mysql-cppconn-8
+        /usr/local/include/mysql-connector-c++/include
+    NO_DEFAULT_PATH
 )
-find_library(MYSQL_CONNECTOR_LIBRARY mysqlcppconn8
-    HINTS /usr/local/lib /usr/lib
-    PATH_SUFFIXES mysql
+
+find_library(MYSQL_CONNECTOR_LIBRARY
+    NAMES mysqlcppconn8
+    PATHS
+        /usr/lib/x86_64-linux-gnu
+        /usr/local/lib
+        /usr/local/lib/mysql-connector-c++/lib64
+    NO_DEFAULT_PATH
 )
+
 find_library(MYSQL_CONNECTOR_STATIC_LIBRARY mysqlcppconn8-static
     HINTS /usr/local/lib /usr/lib
     PATH_SUFFIXES mysql
 )
 
-# 检查是否找到MySQL Connector/C++
-if(NOT MYSQL_CONNECTOR_INCLUDE_DIR OR NOT MYSQL_CONNECTOR_LIBRARY)
-    message(FATAL_ERROR "MySQL Connector/C++ 8.0.20 not found. Please install mysql-connector-c++-dev package.")
+# 分开检查 MYSQL_CONNECTOR_INCLUDE_DIR MYSQL_CONNECTOR_LIBRARY
+if(NOT MYSQL_CONNECTOR_INCLUDE_DIR)
+    message(FATAL_ERROR "MySQL Connector/C++ 8.0.20 include not found. Please install mysql-connector-c++-dev package.")
+endif()
+
+if(NOT MYSQL_CONNECTOR_LIBRARY)
+    message(FATAL_ERROR "MySQL Connector/C++ 8.0.20 library not found. Please install mysql-connector-c++-dev package.")
 endif()
 
 # 设置包含目录

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <unistd.h>
+#include <iostream>
 
 namespace market_feeder {
 
@@ -258,7 +259,7 @@ LogLevel ConfigManager::stringToLogLevel(const std::string& level) const {
     std::transform(lower_level.begin(), lower_level.end(), lower_level.begin(), ::tolower);
     
     if (lower_level == "trace") return LogLevel::TRACE;
-    if (lower_level == "debug") return LogLevel::DEBUG;
+    if (lower_level == "debug") return LogLevel::DBG;
     if (lower_level == "info") return LogLevel::INFO;
     if (lower_level == "warn" || lower_level == "warning") return LogLevel::WARN;
     if (lower_level == "error") return LogLevel::ERROR;

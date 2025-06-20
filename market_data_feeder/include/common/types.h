@@ -26,7 +26,7 @@ enum class ProcessStatus {
 // 日志级别
 enum class LogLevel {
     TRACE = 0,
-    DEBUG = 1,
+    DBG = 1,
     INFO = 2,
     WARN = 3,
     ERROR = 4,

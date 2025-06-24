@@ -81,7 +81,11 @@
         "thread": "cpp",
         "cinttypes": "cpp",
         "typeinfo": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "bitset": "cpp",
+        "codecvt": "cpp",
+        "forward_list": "cpp",
+        "list": "cpp"
     },
     "github.copilot.chat.localeOverride": "zh-CN"
 }

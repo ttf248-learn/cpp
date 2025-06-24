@@ -226,7 +226,7 @@ private:
                                        const std::chrono::system_clock::time_point& end_time);
     
     // 解析查询结果
-    bool parseMarketDataResult(MYSQL_RES* result, std::vector<MarketData>& data);
+    bool parseMarketDataResult(mysqlx::SqlResult& result, std::vector<MarketData>& data);
     
     // 时间转换函数
     std::string timePointToString(const std::chrono::system_clock::time_point& tp);

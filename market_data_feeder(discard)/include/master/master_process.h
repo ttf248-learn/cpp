@@ -53,6 +53,10 @@ private:
     bool stopWorkerProcesses();
     pid_t forkWorkerProcess(int worker_id);
     bool restartWorkerProcess(int worker_id);
+    bool createWorkerProcesses();
+    bool createWorkerProcess(int worker_id);
+    void execWorkerProcess(int worker_id);
+    void setProcessTitle(const std::string& title);
     
     // 进程监控
     void monitorWorkerProcesses();

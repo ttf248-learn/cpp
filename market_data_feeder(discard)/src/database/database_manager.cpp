@@ -522,14 +522,14 @@ void DatabaseManager::shutdown() {
     
     LOG_INFO("Shutting down database manager...");
     
-    connection_pool_.shutdown();
+    connection_pool_->shutdown();
     initialized_ = false;
     
     LOG_INFO("Database manager shutdown completed");
 }
 
 DBErrorCode DatabaseManager::saveMarketData(const MarketData& data) {
-    auto conn = connection_pool_.getConnection();
+auto conn = connection_pool_->getConnection();
     if (!conn) {
         LOG_ERROR("Failed to get database connection");
         return DBErrorCode::POOL_EXHAUSTED;

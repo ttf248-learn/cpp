@@ -99,6 +99,9 @@ private:
     // 清理资源
     void cleanup();
     
+    // 辅助函数
+    void setProcessTitle(const std::string& title);
+    
 private:
     // 基本信息
     int worker_id_;

@@ -40,14 +40,16 @@ void signal_handler(int sig) {
 }
 
 MasterProcess::MasterProcess() 
-    : running_(false), worker_count_(0), next_worker_id_(1) {
+    : running_(false), shutdown_requested_(false), reload_requested_(false),
+      target_worker_count_(0) {
 }
 
 MasterProcess::~MasterProcess() {
     stop();
 }
 
-bool MasterProcess::initialize() {
+bool MasterProcess::initialize(const std::string& config_file) {
+    config_file_ = config_file;
     LOG_INFO("Initializing master process...");
     
     // 获取配置
@@ -81,7 +83,7 @@ bool MasterProcess::initialize() {
     }
     
     // 初始化IPC管理器
-    if (!IPCManager::getInstance().initialize(true)) {
+    if (!IPCManager::getInstance().initialize(ProcessType::MASTER)) {
         LOG_ERROR("Failed to initialize IPC manager");
         return false;
     }
@@ -104,7 +106,7 @@ bool MasterProcess::initialize() {
     return true;
 }
 
-bool MasterProcess::run() {
+int MasterProcess::run() {
     if (running_) {
         LOG_WARN("Master process is already running");
         return false;
@@ -149,7 +151,7 @@ void MasterProcess::stop() {
     LOG_INFO("Master process stopped");
 }
 
-void MasterProcess::reload() {
+bool MasterProcess::reloadConfig() {
     LOG_INFO("Reloading configuration...");
     
     // 重新加载配置
@@ -162,7 +164,7 @@ void MasterProcess::reload() {
     IPCManager::getInstance().setReloadFlag(true);
     
     // 向所有工作进程发送重载信号
-    for (const auto& worker : workers_) {
+    for (const auto& worker : worker_processes_) {
         if (worker.second.pid > 0) {
             kill(worker.second.pid, SIGHUP);
         }
@@ -233,7 +235,7 @@ bool MasterProcess::daemonize() {
     return true;
 }
 
-bool MasterProcess::createPidFile(const std::string& pid_file) {
+bool MasterProcess::createPidFile() {
     std::ofstream file(pid_file);
     if (!file.is_open()) {
         LOG_ERROR("Failed to create PID file: {}", pid_file);
@@ -248,7 +250,7 @@ bool MasterProcess::createPidFile(const std::string& pid_file) {
     return true;
 }
 
-bool MasterProcess::setUserAndGroup(const std::string& user, const std::string& group) {
+bool MasterProcess::setUserAndGroup() {
     if (getuid() != 0) {
         // 非root用户，跳过用户切换
         LOG_INFO("Running as non-root user, skipping user/group change");
@@ -314,7 +316,7 @@ bool MasterProcess::setResourceLimits() {
     return true;
 }
 
-bool MasterProcess::setupSignalHandlers() {
+void MasterProcess::setupSignalHandlers() {
     // 设置信号处理函数
     struct sigaction sa;
     sa.sa_handler = signal_handler;
@@ -341,7 +343,7 @@ bool MasterProcess::createWorkerProcesses() {
     LOG_INFO("Creating {} worker processes...", worker_count_);
     
     for (int i = 0; i < worker_count_; ++i) {
-        if (!createWorkerProcess(next_worker_id_++)) {
+        if (!createWorkerProcess(i + 1)) {
             LOG_ERROR("Failed to create worker process {}", i);
             return false;
         }
@@ -414,7 +416,7 @@ void MasterProcess::execWorkerProcess(int worker_id) {
     exit(0);
 }
 
-void MasterProcess::mainLoop() {
+void MasterProcess::monitorWorkerProcesses() {
     LOG_INFO("Entering main loop...");
     
     auto last_stats_time = std::chrono::steady_clock::now();
@@ -434,7 +436,7 @@ void MasterProcess::mainLoop() {
         }
         
         if (g_child_exited) {
-            handleChildExit();
+            handleDeadWorker(0);
             g_child_exited = 0;
         }
         
@@ -458,7 +460,7 @@ void MasterProcess::mainLoop() {
     LOG_INFO("Exiting main loop");
 }
 
-void MasterProcess::handleChildExit() {
+void MasterProcess::handleDeadWorker(pid_t pid) {
     pid_t pid;
     int status;
     
@@ -498,7 +500,7 @@ void MasterProcess::handleChildExit() {
     }
 }
 
-void MasterProcess::processMessages() {
+void MasterProcess::processIPCMessages() {
     IPCMessage message;
     
     // 处理所有待处理的消息
@@ -523,26 +525,26 @@ void MasterProcess::processMessages() {
     }
 }
 
-void MasterProcess::handleHeartbeat(const IPCMessage& message) {
+void MasterProcess::handleHeartbeatMessage(const IPCMessage& message) {
     // 更新工作进程心跳时间
     IPCManager::getInstance().updateWorkerStatus(message.sender_pid, ProcessStatus::RUNNING);
     
     LOG_TRACE("Heartbeat received from worker process {}", message.sender_pid);
 }
 
-void MasterProcess::handleStatusUpdate(const IPCMessage& message) {
+void MasterProcess::handleStatisticsMessage(const IPCMessage& message) {
     ProcessStatus status = static_cast<ProcessStatus>(message.data.status_data.status);
     IPCManager::getInstance().updateWorkerStatus(message.sender_pid, status);
     
     LOG_DEBUG("Status update from worker {}: {}", message.sender_pid, static_cast<int>(status));
 }
 
-void MasterProcess::handleErrorReport(const IPCMessage& message) {
+void MasterProcess::handleErrorReportMessage(const IPCMessage& message) {
     LOG_ERROR("Error report from worker {}: {}", 
               message.sender_pid, message.data.error_data.error_message);
 }
 
-void MasterProcess::handleStatistics(const IPCMessage& message) {
+void MasterProcess::updateGlobalStatistics() {
     // 更新统计信息
     ProcessStatistics stats;
     memcpy(&stats, &message.data.stats_data, sizeof(ProcessStatistics));
@@ -552,7 +554,7 @@ void MasterProcess::handleStatistics(const IPCMessage& message) {
 }
 
 void MasterProcess::monitorWorkerProcesses() {
-    auto workers = IPCManager::getInstance().getWorkerProcesses();
+    auto workers = IPCManager::getInstance().getAllProcesses();
     time_t current_time = time(nullptr);
     
     for (const auto& worker : workers) {
@@ -568,7 +570,7 @@ void MasterProcess::monitorWorkerProcesses() {
     }
 }
 
-void MasterProcess::printStatistics() {
+void MasterProcess::logProcessStatistics() {
     auto stats = IPCManager::getInstance().getStatistics();
     auto workers = IPCManager::getInstance().getWorkerProcesses();
     
@@ -637,8 +639,8 @@ void MasterProcess::cleanup() {
     LOG_INFO("Cleaning up master process resources...");
     
     // 删除PID文件
-    if (!pid_file_.empty()) {
-        unlink(pid_file_.c_str());
+    if (!pid_file_path_.empty()) {
+        unlink(pid_file_path_.c_str());
         LOG_INFO("PID file removed: {}", pid_file_);
     }
     
@@ -646,7 +648,7 @@ void MasterProcess::cleanup() {
     IPCManager::getInstance().cleanup();
     
     // 清理工作进程记录
-    workers_.clear();
+    worker_processes_.clear();
     
     LOG_INFO("Master process cleanup completed");
 }

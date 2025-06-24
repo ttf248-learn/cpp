@@ -32,17 +32,17 @@ void worker_signal_handler(int sig) {
     }
 }
 
-WorkerProcess::WorkerProcess() 
-    : worker_id_(0), running_(false), sdk_(nullptr), db_manager_(nullptr),
-      last_heartbeat_time_(0), message_count_(0), error_count_(0) {
+WorkerProcess::WorkerProcess(int worker_id) 
+    : worker_id_(worker_id), running_(false), shutdown_requested_(false),
+      reload_requested_(false), error_count_(0), recovery_attempts_(0),
+      processed_count_(0), received_count_(0), saved_count_(0) {
 }
 
 WorkerProcess::~WorkerProcess() {
     stop();
 }
 
-bool WorkerProcess::initialize(int worker_id) {
-    worker_id_ = worker_id;
+bool WorkerProcess::initialize() {
     
     LOG_INFO("Initializing worker process {}", worker_id_);
     
@@ -63,7 +63,7 @@ bool WorkerProcess::initialize(int worker_id) {
     }
     
     // 初始化IPC管理器
-    if (!IPCManager::getInstance().initialize(false)) {
+    if (!IPCManager::getInstance().initialize(ProcessType::WORKER)) {
         LOG_ERROR("Failed to initialize IPC manager for worker {}", worker_id_);
         return false;
     }
@@ -97,7 +97,7 @@ bool WorkerProcess::initialize(int worker_id) {
     return true;
 }
 
-bool WorkerProcess::run() {
+int WorkerProcess::run() {
     if (running_) {
         LOG_WARN("Worker process {} is already running", worker_id_);
         return false;
@@ -144,7 +144,7 @@ void WorkerProcess::stop() {
     running_ = false;
     
     // 发送停止状态
-    sendStatusUpdate(ProcessStatus::STOPPING);
+    // sendStatusUpdate(ProcessStatus::STOPPING);
     
     // 断开SDK连接
     if (sdk_) {
@@ -152,7 +152,7 @@ void WorkerProcess::stop() {
     }
     
     // 处理剩余的数据
-    flushDataBuffers();
+    // flushDataBuffers();
     
     // 清理资源
     cleanup();
@@ -172,8 +172,8 @@ bool WorkerProcess::initializeSDK() {
     
     // 配置SDK
     SDKConfig sdk_config;
-    sdk_config.library_path = config.sdk.library_path;
-    sdk_config.config_file = config.sdk.config_file;
+    sdk_config.library_path = config_.sdk.library_path;
+    sdk_config.config_file = config_.sdk.config_file;
     sdk_config.connect_timeout = config.sdk.connect_timeout;
     sdk_config.heartbeat_interval = config.sdk.heartbeat_interval;
     sdk_config.reconnect_interval = config.sdk.reconnect_interval;
@@ -186,25 +186,22 @@ bool WorkerProcess::initializeSDK() {
     }
     
     // 设置数据回调
-    sdk_->setDataCallback([this](const MarketData& data) {
-        this->onMarketData(data);
-    });
+    sdk_->setMarketDataCallback(
+        std::bind(&WorkerProcess::handleMarketDataCallback, this, std::placeholders::_1));
     
     // 设置错误回调
-    sdk_->setErrorCallback([this](SDKErrorCode error, const std::string& message) {
-        this->onSDKError(error, message);
-    });
+    sdk_->setErrorCallback(
+        std::bind(&WorkerProcess::handleError, this, std::placeholders::_1));
     
     // 设置连接状态回调
-    sdk_->setConnectionCallback([this](SDKConnectionStatus status) {
-        this->onConnectionStatusChanged(status);
-    });
+    sdk_->setConnectionStatusCallback(
+        std::bind(&WorkerProcess::handleError, this, std::placeholders::_1));
     
     LOG_INFO("SDK initialized successfully for worker {}", worker_id_);
     return true;
 }
 
-bool WorkerProcess::setupSignalHandlers() {
+void WorkerProcess::setupSignalHandlers() {
     // 设置信号处理函数
     struct sigaction sa;
     sa.sa_handler = worker_signal_handler;
@@ -226,7 +223,7 @@ bool WorkerProcess::setupSignalHandlers() {
     return true;
 }
 
-void WorkerProcess::setCpuAffinity() {
+bool WorkerProcess::setCpuAffinity() {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     
@@ -244,7 +241,7 @@ void WorkerProcess::setCpuAffinity() {
     }
 }
 
-void WorkerProcess::setProcessPriority(int priority) {
+bool WorkerProcess::setProcessPriority() {
     if (setpriority(PRIO_PROCESS, 0, priority) == 0) {
         LOG_INFO("Worker {} priority set to {}", worker_id_, priority);
     } else {
@@ -253,7 +250,7 @@ void WorkerProcess::setProcessPriority(int priority) {
     }
 }
 
-void WorkerProcess::initializeDataBuffers() {
+void WorkerProcess::setupMemoryPool() {
     const auto& config = ConfigManager::getInstance().getConfig();
     
     // 为每种数据类型创建缓冲区
@@ -265,7 +262,7 @@ void WorkerProcess::initializeDataBuffers() {
     LOG_DEBUG("Data buffers initialized for worker {}", worker_id_);
 }
 
-void WorkerProcess::initializeStatistics() {
+void WorkerProcess::updateStatistics() {
     statistics_.worker_id = worker_id_;
     statistics_.start_time = time(nullptr);
     statistics_.messages_processed = 0;
@@ -277,7 +274,7 @@ void WorkerProcess::initializeStatistics() {
     LOG_DEBUG("Statistics initialized for worker {}", worker_id_);
 }
 
-bool WorkerProcess::connectToMarketData() {
+bool WorkerProcess::initializeSDK() {
     if (!sdk_) {
         LOG_ERROR("SDK not initialized for worker {}", worker_id_);
         return false;
@@ -309,7 +306,7 @@ bool WorkerProcess::connectToMarketData() {
     return true;
 }
 
-bool WorkerProcess::subscribeMarketData() {
+bool WorkerProcess::initializeDatabase() {
     if (!sdk_) {
         LOG_ERROR("SDK not initialized for worker {}", worker_id_);
         return false;
@@ -342,7 +339,7 @@ bool WorkerProcess::subscribeMarketData() {
     return true;
 }
 
-void WorkerProcess::mainLoop() {
+void WorkerProcess::processMarketData() {
     LOG_INFO("Entering main loop for worker {}", worker_id_);
     
     const auto& config = ConfigManager::getInstance().getConfig();
@@ -409,7 +406,7 @@ void WorkerProcess::mainLoop() {
     LOG_INFO("Exiting main loop for worker {}", worker_id_);
 }
 
-void WorkerProcess::onMarketData(const MarketData& data) {
+void WorkerProcess::handleMarketDataCallback(const MarketData& data) {
     PERF_TIMER("onMarketData");
     
     try {
@@ -439,7 +436,7 @@ void WorkerProcess::onMarketData(const MarketData& data) {
     }
 }
 
-void WorkerProcess::onSDKError(SDKErrorCode error, const std::string& message) {
+void WorkerProcess::handleError(const std::string& error_msg, bool fatal) {
     LOG_ERROR("SDK error for worker {}: {} - {}", 
               worker_id_, static_cast<int>(error), message);
     
@@ -455,7 +452,7 @@ void WorkerProcess::onSDKError(SDKErrorCode error, const std::string& message) {
     }
 }
 
-void WorkerProcess::onConnectionStatusChanged(SDKConnectionStatus status) {
+void WorkerProcess::reportErrorToMaster(const std::string& error_msg) {
     LOG_INFO("Connection status changed for worker {}: {}", 
              worker_id_, static_cast<int>(status));
     
@@ -476,15 +473,15 @@ void WorkerProcess::processIPCMessages() {
     IPCMessage message;
     
     // 处理所有待处理的消息
-    while (IPCManager::getInstance().receiveMessage(message, MessageType::ANY, false)) {
-        switch (message.type) {
-            case MessageType::SHUTDOWN:
+    while (IPCManager::getInstance().receiveMessage(message, 0, false)) {
+        switch (message.message_type) {
+            case 2: // SHUTDOWN
                 LOG_INFO("Shutdown message received for worker {}", worker_id_);
                 running_ = false;
                 break;
-            case MessageType::RELOAD:
+            case 1: // RELOAD
                 LOG_INFO("Reload message received for worker {}", worker_id_);
-                handleReload();
+                // handleReload();
                 break;
             default:
                 LOG_TRACE("Unknown message type for worker {}: {}", 
@@ -496,20 +493,20 @@ void WorkerProcess::processIPCMessages() {
 
 void WorkerProcess::sendHeartbeat() {
     IPCMessage message;
-    message.type = MessageType::HEARTBEAT;
+    message.message_type = 0; // HEARTBEAT
     message.sender_pid = getpid();
-    message.receiver_pid = getppid();
+    message.target_pid = getppid();
     message.timestamp = time(nullptr);
-    message.data.heartbeat_data.worker_id = worker_id_;
+    // message.data.heartbeat_data.worker_id = worker_id_;
     
     if (!IPCManager::getInstance().sendMessage(message)) {
         LOG_WARN("Failed to send heartbeat for worker {}", worker_id_);
     }
     
-    last_heartbeat_time_ = time(nullptr);
+    last_heartbeat_ = std::chrono::system_clock::now();
 }
 
-void WorkerProcess::sendStatusUpdate(ProcessStatus status) {
+void WorkerProcess::sendHeartbeat() {
     IPCMessage message;
     message.type = MessageType::STATUS_UPDATE;
     message.sender_pid = getpid();
@@ -523,7 +520,7 @@ void WorkerProcess::sendStatusUpdate(ProcessStatus status) {
     }
 }
 
-void WorkerProcess::sendErrorReport(const std::string& error_message) {
+void WorkerProcess::processIPCMessages() {
     IPCMessage message;
     message.type = MessageType::ERROR_REPORT;
     message.sender_pid = getpid();
@@ -539,7 +536,7 @@ void WorkerProcess::sendErrorReport(const std::string& error_message) {
     }
 }
 
-void WorkerProcess::sendStatistics() {
+void WorkerProcess::sendStatisticsToMaster() {
     IPCMessage message;
     message.type = MessageType::STATISTICS;
     message.sender_pid = getpid();
@@ -552,7 +549,7 @@ void WorkerProcess::sendStatistics() {
     }
 }
 
-void WorkerProcess::flushDataBuffers() {
+void WorkerProcess::processBatchData() {
     for (auto& buffer_pair : data_buffers_) {
         if (!buffer_pair.second.empty()) {
             flushDataBuffer(buffer_pair.first);
@@ -560,7 +557,7 @@ void WorkerProcess::flushDataBuffers() {
     }
 }
 
-void WorkerProcess::flushDataBuffer(MarketDataType data_type) {
+void WorkerProcess::bufferMarketData(const MarketData& data) {
     PERF_TIMER("flushDataBuffer");
     
     auto it = data_buffers_.find(data_type);
@@ -589,7 +586,7 @@ void WorkerProcess::flushDataBuffer(MarketDataType data_type) {
     }
 }
 
-void WorkerProcess::handleReload() {
+void WorkerProcess::handleShutdownMessage(const IPCMessage& message) {
     LOG_INFO("Handling configuration reload for worker {}", worker_id_);
     
     // 重新加载配置
@@ -612,7 +609,7 @@ void WorkerProcess::handleReload() {
     LOG_INFO("Configuration reload completed for worker {}", worker_id_);
 }
 
-void WorkerProcess::handleReconnection() {
+void WorkerProcess::handleReloadConfigMessage(const IPCMessage& message) {
     if (!sdk_) {
         return;
     }
@@ -651,7 +648,7 @@ void WorkerProcess::cleanup() {
     }
     
     // 清空数据缓冲区
-    data_buffers_.clear();
+    // data_buffers_.clear();
     
     LOG_INFO("Worker process {} cleanup completed", worker_id_);
 }

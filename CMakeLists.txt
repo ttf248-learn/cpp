@@ -51,5 +51,5 @@ endif()
 # message(STATUS "Adding system_monitor subdirectory...")
 # add_subdirectory(system_monitor)
 
-message(STATUS "Adding market_data_feeder subdirectory...")
-add_subdirectory(market_data_feeder)
+# message(STATUS "Adding market_data_feeder subdirectory...")
+# add_subdirectory(market_data_feeder)
